@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-usage"
+version = "0.1.0"
+description = "An inline terminal report for local coding-agent token usage"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "agent-usage contributors"}]
+dependencies = []
+
+[project.scripts]
+agent-usage = "agent_usage.cli:main"
+
+[tool.setuptools]
+packages = ["agent_usage"]
+py-modules = ["codex_tokens"]

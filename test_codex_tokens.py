@@ -13,6 +13,7 @@ from codex_tokens import (
     filter_usage,
     parse_session,
     period_dates,
+    report_lines,
     month_period,
     shift_month,
 )
@@ -144,6 +145,18 @@ class TokenLogTests(unittest.TestCase):
         start, end = month_period(date(2024, 2, 14), timezone.utc)
         self.assertEqual(start, datetime(2024, 2, 1, tzinfo=timezone.utc))
         self.assertEqual(end, datetime(2024, 3, 1, tzinfo=timezone.utc))
+
+    def test_report_can_split_model_usage_by_agent(self):
+        from codex_tokens import ScanResult, Usage
+        rows = [
+            Usage(datetime(2026, 9, 1, tzinfo=timezone.utc), "same", 10, 2, agent="Codex"),
+            Usage(datetime(2026, 9, 1, tzinfo=timezone.utc), "same", 20, 3, agent="OpenCode"),
+        ]
+        provider = CombinedProvider(())
+        lines = report_lines(ScanResult(rows), None, None, provider, 90, split_agents=True)
+        self.assertIn("Agent", lines[7])
+        self.assertTrue(any("Codex" in line and "same" in line for line in lines))
+        self.assertTrue(any("OpenCode" in line and "same" in line for line in lines))
 
 
 if __name__ == "__main__":

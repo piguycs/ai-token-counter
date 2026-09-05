@@ -25,6 +25,7 @@ class Usage:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int = 0
+    agent: str = "unknown"
 
 @dataclass
 class ScanResult:
@@ -57,17 +58,18 @@ def parse_timestamp(value: str) -> datetime:
     return parsed
 
 
-def _usage_from_payload(timestamp: datetime, model: str, payload: dict) -> Usage:
+def _usage_from_payload(timestamp: datetime, model: str, payload: dict, agent: str = "Codex") -> Usage:
     return Usage(
         timestamp=timestamp,
         model=model or "unknown",
         input_tokens=int(payload.get("input_tokens", 0) or 0),
         output_tokens=int(payload.get("output_tokens", 0) or 0),
         cached_input_tokens=int(payload.get("cached_input_tokens", 0) or 0),
+        agent=agent,
     )
 
 
-def parse_session(path: Path) -> tuple[list[Usage], int]:
+def parse_session(path: Path, agent: str = "Codex") -> tuple[list[Usage], int]:
     """Parse one rollout, preferring new usage records over duplicate legacy events."""
     model = "unknown"
     direct: list[Usage] = []
@@ -96,12 +98,12 @@ def parse_session(path: Path) -> tuple[list[Usage], int]:
                 stamp = parse_timestamp(stamp_value)
 
                 if item_type == "token_usage_record" and isinstance(payload.get("usage"), dict):
-                    direct.append(_usage_from_payload(stamp, model, payload["usage"]))
+                    direct.append(_usage_from_payload(stamp, model, payload["usage"], agent))
                 elif item_type == "event_msg" and payload.get("type") == "token_count":
                     info = payload.get("info") or {}
                     last = info.get("last_token_usage")
                     if isinstance(last, dict):
-                        legacy.append(_usage_from_payload(stamp, model, last))
+                        legacy.append(_usage_from_payload(stamp, model, last, agent))
             except (json.JSONDecodeError, TypeError, ValueError):
                 malformed += 1
 
@@ -139,7 +141,7 @@ class CodexProvider:
         return result
 
 
-def _opencode_usage(data: dict) -> Usage | None:
+def _opencode_usage(data: dict, agent: str = "OpenCode") -> Usage | None:
     if data.get("role") != "assistant" or not isinstance(data.get("tokens"), dict):
         return None
     tokens = data["tokens"]
@@ -160,6 +162,7 @@ def _opencode_usage(data: dict) -> Usage | None:
         input_tokens=int(tokens.get("input", 0) or 0) + cached,
         output_tokens=int(tokens.get("output", 0) or 0) + int(tokens.get("reasoning", 0) or 0),
         cached_input_tokens=cached,
+        agent=agent,
     )
 
 
@@ -330,12 +333,14 @@ def report_lines(
     now: datetime | None = None,
     selected_period: str | None = None,
     selected_month: date | None = None,
+    split_agents: bool = False,
 ) -> list[str]:
     now = now or datetime.now().astimezone()
     records = filter_usage(result.usage, start, end)
-    totals: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    totals: dict[str | tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
     for row in records:
-        bucket = totals[row.model]
+        key: str | tuple[str, str] = (row.agent, row.model) if split_agents else row.model
+        bucket = totals[key]
         bucket[0] += row.input_tokens
         bucket[1] += row.output_tokens
         bucket[2] += row.cached_input_tokens
@@ -350,7 +355,9 @@ def report_lines(
     ]
     visible_columns = [column for column in metric_columns if column[0] in metrics]
     table_width = min(max(width, 62), 100)
-    model_width = max(16, table_width - (16 * len(visible_columns)))
+    metric_width = 16 * len(visible_columns)
+    agent_width = 15 if split_agents else 0
+    model_width = max(16, table_width - metric_width - agent_width)
     rule = "─" * table_width
     if selected_month:
         tabs = f"Month:  ←  [{selected_month.strftime('%B %Y')}]  →"
@@ -380,13 +387,19 @@ def report_lines(
         "  " + "".join(value.ljust(card_width) for value in metric_values),
         "",
         rule,
-        f"{'Model':<{model_width}}" + "".join(f" {title:>14}" for _, title, _ in visible_columns),
+        (
+            f"{'Agent':<14} {'Model':<{model_width}}"
+            if split_agents else f"{'Model':<{model_width}}"
+        ) + "".join(f" {title:>14}" for _, title, _ in visible_columns),
         rule,
     ]
     sort_index = visible_columns[0][2] if visible_columns else 0
-    for model, values in sorted(totals.items(), key=lambda item: item[1][sort_index], reverse=True):
+    for key, values in sorted(totals.items(), key=lambda item: item[1][sort_index], reverse=True):
+        agent, model = key if split_agents else ("", key)
+        assert isinstance(model, str)
         short_model = model if len(model) <= model_width else model[: model_width - 1] + "…"
-        lines.append(f"{short_model:<{model_width}}" + "".join(
+        prefix = f"{agent:<14} {short_model:<{model_width}}" if split_agents else f"{short_model:<{model_width}}"
+        lines.append(prefix + "".join(
             f" {fmt_number(values[index]):>14}" for _, _, index in visible_columns
         ))
     if not totals:
@@ -467,6 +480,7 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
     return_period_index = period_index
     start, end = preset(initial_period, now)
     selected_month: date | None = None
+    split_agents = False
     agent_keys = list(providers)
     agent_index = agent_keys.index(initial_agent)
     results: dict[str, ScanResult] = {}
@@ -481,14 +495,15 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
             result = results[agent_key]
             width = shutil.get_terminal_size((90, 24)).columns
             selected = PERIODS[period_index] if period_index is not None else None
+            show_split = split_agents and provider.key == CombinedProvider.key
             lines = report_lines(
                 result, start, end, provider, width,
-                selected_period=selected, selected_month=selected_month,
+                selected_period=selected, selected_month=selected_month, split_agents=show_split,
             )
             if selected_month:
-                controls = "[←/→] Month    [m] Exit month mode    [Tab] Agent    [q] Quit"
+                controls = "[←/→] Month    [m] Exit month mode    [s] Split agents    [Tab] Agent    [q] Quit"
             else:
-                controls = "[←/→] Period    [m] Browse months    [Tab] Agent    [c] Custom    [q] Quit"
+                controls = "[←/→] Period    [m] Browse months    [s] Split agents    [Tab] Agent    [c] Custom    [q] Quit"
             lines += ["", controls]
             height = draw(lines, height)
             key = read_key().lower()
@@ -496,6 +511,8 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
                 break
             if key == "\t":
                 agent_index = (agent_index + 1) % len(agent_keys)
+            elif key == "s" and provider.key == CombinedProvider.key:
+                split_agents = not split_agents
             if key in ("left", "right"):
                 step = -1 if key == "left" else 1
                 if selected_month:
