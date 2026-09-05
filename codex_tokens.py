@@ -39,7 +39,7 @@ class UsageProvider(Protocol):
     key: ClassVar[str]
     display_name: ClassVar[str]
     supported_metrics: ClassVar[frozenset[str]]
-    location: Path
+    location: Path | str
 
     @classmethod
     def default_location(cls) -> Path: ...
@@ -213,6 +213,29 @@ class OpenCodeProvider:
         return self._scan_database(database) if database.is_file() else self._scan_legacy_json()
 
 
+@dataclass
+class CombinedProvider:
+    """Combine normalized records from several agent providers."""
+
+    providers: tuple[UsageProvider, ...]
+    key: ClassVar[str] = "all"
+    display_name: ClassVar[str] = "All agents"
+    supported_metrics: ClassVar[frozenset[str]] = frozenset({"input", "output", "cached_input"})
+
+    @property
+    def location(self) -> str:
+        return " + ".join(provider.display_name for provider in self.providers)
+
+    def scan(self) -> ScanResult:
+        combined = ScanResult([])
+        for provider in self.providers:
+            result = provider.scan()
+            combined.usage.extend(result.usage)
+            combined.files_scanned += result.files_scanned
+            combined.malformed_lines += result.malformed_lines
+        return combined
+
+
 # Adding another agent requires only a UsageProvider implementation and one
 # registry entry; the filtering, aggregation, CLI, and TUI remain unchanged.
 PROVIDERS: dict[str, type[UsageProvider]] = {
@@ -263,6 +286,21 @@ def preset(name: str, now: datetime) -> tuple[datetime | None, datetime | None]:
     return None, None
 
 
+def shift_month(month: date, amount: int) -> date:
+    """Return the first day of the month `amount` months away."""
+    absolute = month.year * 12 + month.month - 1 + amount
+    return date(absolute // 12, absolute % 12 + 1, 1)
+
+
+def month_period(month: date, local_tz) -> tuple[datetime, datetime]:
+    first = month.replace(day=1)
+    following = shift_month(first, 1)
+    return (
+        datetime.combine(first, time.min, tzinfo=local_tz),
+        datetime.combine(following, time.min, tzinfo=local_tz),
+    )
+
+
 def fmt_number(value: int) -> str:
     return f"{value:,}"
 
@@ -291,6 +329,7 @@ def report_lines(
     width: int,
     now: datetime | None = None,
     selected_period: str | None = None,
+    selected_month: date | None = None,
 ) -> list[str]:
     now = now or datetime.now().astimezone()
     records = filter_usage(result.usage, start, end)
@@ -313,15 +352,18 @@ def report_lines(
     table_width = min(max(width, 62), 100)
     model_width = max(16, table_width - (16 * len(visible_columns)))
     rule = "─" * table_width
-    tabs = "  ".join(
-        f"[{PERIOD_NAMES[key]}]" if key == selected_period else PERIOD_NAMES[key]
-        for key in PERIODS
-    )
+    if selected_month:
+        tabs = f"Month:  ←  [{selected_month.strftime('%B %Y')}]  →"
+    else:
+        tabs = "  ".join(
+            f"[{PERIOD_NAMES[key]}]" if key == selected_period else PERIOD_NAMES[key]
+            for key in PERIODS
+        )
     lines = [
         "Token usage",
         f"Agent: {provider.display_name}    Period: {period_dates(result.usage, start, end, now)}",
     ]
-    if selected_period:
+    if selected_period or selected_month:
         lines.append(tabs)
     metric_titles = []
     metric_values = []
@@ -422,7 +464,9 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
     local_tz = datetime.now().astimezone().tzinfo
     now = datetime.now(local_tz)
     period_index = PERIODS.index(initial_period)
+    return_period_index = period_index
     start, end = preset(initial_period, now)
+    selected_month: date | None = None
     agent_keys = list(providers)
     agent_index = agent_keys.index(initial_agent)
     results: dict[str, ScanResult] = {}
@@ -437,8 +481,15 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
             result = results[agent_key]
             width = shutil.get_terminal_size((90, 24)).columns
             selected = PERIODS[period_index] if period_index is not None else None
-            lines = report_lines(result, start, end, provider, width, selected_period=selected)
-            lines += ["", "[←/→] Period    [Tab] Agent    [c] Custom dates    [q] Quit"]
+            lines = report_lines(
+                result, start, end, provider, width,
+                selected_period=selected, selected_month=selected_month,
+            )
+            if selected_month:
+                controls = "[←/→] Month    [m] Exit month mode    [Tab] Agent    [q] Quit"
+            else:
+                controls = "[←/→] Period    [m] Browse months    [Tab] Agent    [c] Custom    [q] Quit"
+            lines += ["", controls]
             height = draw(lines, height)
             key = read_key().lower()
             if key in ("q", "\x03", "\x04"):
@@ -447,8 +498,24 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
                 agent_index = (agent_index + 1) % len(agent_keys)
             if key in ("left", "right"):
                 step = -1 if key == "left" else 1
-                period_index = ((period_index if period_index is not None else 0) + step) % len(PERIODS)
-                start, end = preset(PERIODS[period_index], datetime.now(local_tz))
+                if selected_month:
+                    candidate = shift_month(selected_month, step)
+                    current_month = datetime.now(local_tz).date().replace(day=1)
+                    selected_month = min(candidate, current_month)
+                    start, end = month_period(selected_month, local_tz)
+                else:
+                    period_index = ((period_index if period_index is not None else 0) + step) % len(PERIODS)
+                    start, end = preset(PERIODS[period_index], datetime.now(local_tz))
+            elif key == "m":
+                if selected_month:
+                    selected_month = None
+                    period_index = return_period_index
+                    start, end = preset(PERIODS[period_index], datetime.now(local_tz))
+                else:
+                    return_period_index = period_index if period_index is not None else PERIODS.index(initial_period)
+                    selected_month = datetime.now(local_tz).date().replace(day=1)
+                    period_index = None
+                    start, end = month_period(selected_month, local_tz)
             elif key == "c":
                 sys.stdout.write("\x1b[?25h")
                 sys.stdout.flush()
@@ -457,6 +524,7 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
                 if chosen:
                     start, end = chosen
                     period_index = None
+                    selected_month = None
                 height = 0
     finally:
         sys.stdout.write("\x1b[?25h\n")
@@ -466,7 +534,7 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--agent", choices=tuple(PROVIDERS), default="codex")
+    parser.add_argument("--agent", choices=(CombinedProvider.key, *PROVIDERS), default=CombinedProvider.key)
     parser.add_argument("--data-dir", "--codex-home", dest="data_dir", type=Path, help="agent data directory")
     parser.add_argument("--period", choices=PERIODS, default="7d")
     parser.add_argument("--since", help="start date (YYYY-MM-DD) or ISO timestamp")
@@ -486,18 +554,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         start, end = preset(args.period, datetime.now(local_tz))
 
-    provider_type = PROVIDERS[args.agent]
-    provider = provider_type(args.data_dir or provider_type.default_location())
-    if not provider.location.is_dir():
-        parser.error(f"Agent data directory does not exist: {provider.location}")
+    if args.agent == CombinedProvider.key and args.data_dir:
+        parser.error("--data-dir requires a specific --agent")
+    individual_providers: dict[str, UsageProvider] = {
+        key: provider_class(
+            args.data_dir if key == args.agent and args.data_dir else provider_class.default_location()
+        )
+        for key, provider_class in PROVIDERS.items()
+    }
+    available_providers = {
+        key: item for key, item in individual_providers.items() if Path(item.location).is_dir()
+    }
+    if args.agent == CombinedProvider.key:
+        if not available_providers:
+            parser.error("No supported agent data directories were found")
+    elif args.agent not in available_providers:
+        parser.error(f"Agent data directory does not exist: {individual_providers[args.agent].location}")
+    combined = CombinedProvider(tuple(available_providers.values()))
+    provider = combined if args.agent == CombinedProvider.key else available_providers[args.agent]
 
     if sys.stdin.isatty() and sys.stdout.isatty() and not args.no_ui and not (args.since or args.until):
-        providers = {
-            key: provider_class(
-                args.data_dir if key == args.agent and args.data_dir else provider_class.default_location()
-            )
-            for key, provider_class in PROVIDERS.items()
-        }
+        providers = {CombinedProvider.key: combined, **available_providers}
         return run_ui(providers, args.agent, args.period)
 
     result = provider.scan()

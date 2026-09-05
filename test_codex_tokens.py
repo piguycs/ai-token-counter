@@ -1,17 +1,20 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from codex_tokens import (
     CodexProvider,
+    CombinedProvider,
     OpenCodeProvider,
     _opencode_usage,
     common_metrics,
     filter_usage,
     parse_session,
     period_dates,
+    month_period,
+    shift_month,
 )
 
 
@@ -116,6 +119,31 @@ class TokenLogTests(unittest.TestCase):
 
     def test_shared_ui_uses_only_common_metrics(self):
         self.assertEqual(common_metrics(), frozenset({"input", "output"}))
+
+    def test_combined_provider_merges_normalized_usage(self):
+        class FakeProvider:
+            display_name = "Fake"
+            supported_metrics = frozenset({"input", "output"})
+            location = Path("fake")
+
+            def __init__(self, amount):
+                self.amount = amount
+
+            def scan(self):
+                from codex_tokens import ScanResult, Usage
+                return ScanResult([
+                    Usage(datetime(2026, 9, 1, tzinfo=timezone.utc), "same-model", self.amount, 1)
+                ], files_scanned=1)
+
+        result = CombinedProvider((FakeProvider(3), FakeProvider(4))).scan()
+        self.assertEqual(sum(row.input_tokens for row in result.usage), 7)
+        self.assertEqual(result.files_scanned, 2)
+
+    def test_calendar_month_boundaries(self):
+        self.assertEqual(shift_month(date(2026, 1, 1), -1), date(2025, 12, 1))
+        start, end = month_period(date(2024, 2, 14), timezone.utc)
+        self.assertEqual(start, datetime(2024, 2, 1, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2024, 3, 1, tzinfo=timezone.utc))
 
 
 if __name__ == "__main__":

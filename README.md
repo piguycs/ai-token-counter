@@ -8,7 +8,9 @@ Run it:
 python3 codex_tokens.py
 ```
 
-Use the left and right arrow keys to move between today, 7 days, 30 days, and all time. Press `Tab` to switch between Codex and OpenCode, `c` for a custom date range, or `q` to quit. The exact start and end dates are shown in the header.
+The default view combines every model across all agents. Use `Tab` to switch between the combined view, Codex, and OpenCode. Left and right move between today, 7 days, 30 days, and all time.
+
+Press `m` to enter calendar-month mode. Left and right then browse complete months, always using the first through the final day of that month; press `m` again to return. Press `c` for arbitrary custom dates or `q` to quit. Exact start and end dates are shown in the header.
 
 For scripts or a one-shot report:
 
@@ -16,6 +18,7 @@ For scripts or a one-shot report:
 python3 codex_tokens.py --no-ui --period 30d
 python3 codex_tokens.py --since 2026-08-01 --until 2026-08-31
 python3 codex_tokens.py --agent opencode
+python3 codex_tokens.py --agent codex
 ```
 
 `--until` is inclusive when it is a date. Codex defaults to `$CODEX_HOME` or `~/.codex`; OpenCode defaults to `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`. Override either with `--data-dir PATH` (`--codex-home` remains an alias).
