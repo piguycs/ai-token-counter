@@ -1,6 +1,6 @@
 # agent-usage
 
-A small, dependency-free inline TUI that reads local agent usage data and shows total input and output tokens, with a per-model breakdown. Codex and OpenCode are currently included. The UI does not use the terminal's alternate screen, so the final report remains visible after exit.
+A small, dependency-free inline TUI that reads local agent usage data and shows total input, cached input, and output tokens, with a per-model breakdown. Codex and OpenCode are currently included. The UI does not use the terminal's alternate screen, so the final report remains visible after exit.
 
 Run it:
 
@@ -31,10 +31,16 @@ just opencode
 just codex
 ```
 
+For structured data, press `j` in the TUI to print JSON for the current agent and period. It includes input, cached input, uncached input, and output totals and per-agent/model rows. The equivalent script-friendly option is:
+
+```bash
+just report --json --period 30d
+```
+
 `--until` is inclusive when it is a date. Codex defaults to `$CODEX_HOME` or `~/.codex`; OpenCode defaults to `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`. Override either with `--data-dir PATH` (`--codex-home` remains an alias).
 
-The parser supports both current `token_usage_record` entries and older `token_count` entries. When both occur in one session file, it uses the current records to avoid double-counting. Cached input is shown separately but is already part of the input-token count.
+The parser supports both current `token_usage_record` entries and older `token_count` entries. When both occur in one session file, it uses the current records to avoid double-counting. Cached input is shown separately but is already part of the input-token count. For API-rate pricing, calculate regular input as `input − cached input`, then apply the model's regular-input, cached-input, and output rates to those three buckets.
 
 New agents can be added by implementing the `UsageProvider` interface and registering the provider in `PROVIDERS`; period filtering, aggregation, CLI handling, and rendering are shared.
 
-The shared display is intentionally limited to comparable model-usage metrics supported by every registered provider. OpenCode stores cached input outside its raw input count and reasoning outside its raw output count, so the provider normalizes both: input includes cached input and output includes reasoning tokens. Cache details are not shown in the UI.
+The shared display is intentionally limited to comparable model-usage metrics supported by every registered provider. OpenCode stores cached input outside its raw input count and reasoning outside its raw output count, so the provider normalizes both: input includes cached input and output includes reasoning tokens.

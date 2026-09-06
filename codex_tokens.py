@@ -245,7 +245,10 @@ PROVIDERS: dict[str, type[UsageProvider]] = {
     CodexProvider.key: CodexProvider,
     OpenCodeProvider.key: OpenCodeProvider,
 }
-DISPLAY_METRICS = frozenset({"input", "output"})
+# Input totals include cached input.  Show the cached portion separately so a
+# report contains all three quantities needed to price usage at API rates:
+# uncached input (input - cached input), cached input, and output.
+DISPLAY_METRICS = frozenset({"input", "output", "cached_input"})
 
 
 def common_metrics() -> frozenset[str]:
@@ -324,6 +327,55 @@ def period_dates(
     return f"{first.isoformat() if first else '—'}  →  {last.isoformat()}"
 
 
+def report_data(
+    result: ScanResult,
+    start: datetime | None,
+    end: datetime | None,
+    provider: UsageProvider,
+) -> dict:
+    """Return the filtered report in a JSON-friendly, pricing-ready shape."""
+    records = filter_usage(result.usage, start, end)
+    totals: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
+    for row in records:
+        bucket = totals[(row.agent, row.model)]
+        bucket[0] += row.input_tokens
+        bucket[1] += row.output_tokens
+        bucket[2] += row.cached_input_tokens
+
+    def token_buckets(values: list[int]) -> dict[str, int]:
+        input_tokens, output_tokens, cached_input_tokens = values
+        return {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "uncached_input_tokens": input_tokens - cached_input_tokens,
+            "output_tokens": output_tokens,
+        }
+
+    total_values = [
+        sum(values[index] for values in totals.values())
+        for index in range(3)
+    ]
+    return {
+        "agent": provider.key,
+        "agent_name": provider.display_name,
+        "period": {
+            "start": start.isoformat() if start else None,
+            # Filtering uses an exclusive upper boundary to avoid overlap.
+            "end_exclusive": end.isoformat() if end else None,
+        },
+        "responses": len(records),
+        "files_scanned": result.files_scanned,
+        "malformed_lines": result.malformed_lines,
+        "totals": token_buckets(total_values),
+        "models": [
+            {"agent": agent, "model": model, **token_buckets(values)}
+            for (agent, model), values in sorted(
+                totals.items(), key=lambda item: item[1][0], reverse=True
+            )
+        ],
+    }
+
+
 def report_lines(
     result: ScanResult,
     start: datetime | None,
@@ -380,6 +432,9 @@ def report_lines(
     if "output" in metrics:
         metric_titles.append("OUTPUT TOKENS")
         metric_values.append(fmt_number(all_output))
+    if "cached_input" in metrics:
+        metric_titles.append("CACHED INPUT")
+        metric_values.append(fmt_number(sum(x[2] for x in totals.values())))
     card_width = max(18, table_width // max(len(metric_titles), 1))
     lines += [
         "",
@@ -485,6 +540,7 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
     agent_index = agent_keys.index(initial_agent)
     results: dict[str, ScanResult] = {}
     height = 0
+    exported_data: dict | None = None
     sys.stdout.write("\x1b[?25l")
     try:
         while True:
@@ -501,13 +557,16 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
                 selected_period=selected, selected_month=selected_month, split_agents=show_split,
             )
             if selected_month:
-                controls = "[←/→] Month    [m] Exit month mode    [s] Split agents    [Tab] Agent    [q] Quit"
+                controls = "[←/→] Month    [m] Exit month mode    [j] JSON    [s] Split agents    [Tab] Agent    [q] Quit"
             else:
-                controls = "[←/→] Period    [m] Browse months    [s] Split agents    [Tab] Agent    [c] Custom    [q] Quit"
+                controls = "[←/→] Period    [m] Browse months    [j] JSON    [s] Split agents    [Tab] Agent    [c] Custom    [q] Quit"
             lines += ["", controls]
             height = draw(lines, height)
             key = read_key().lower()
             if key in ("q", "\x03", "\x04"):
+                break
+            if key == "j":
+                exported_data = report_data(result, start, end, provider)
                 break
             if key == "\t":
                 agent_index = (agent_index + 1) % len(agent_keys)
@@ -546,6 +605,8 @@ def run_ui(providers: dict[str, UsageProvider], initial_agent: str, initial_peri
     finally:
         sys.stdout.write("\x1b[?25h\n")
         sys.stdout.flush()
+    if exported_data is not None:
+        print(json.dumps(exported_data, indent=2))
     return 0
 
 
@@ -557,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", help="start date (YYYY-MM-DD) or ISO timestamp")
     parser.add_argument("--until", help="inclusive end date (YYYY-MM-DD) or ISO timestamp")
     parser.add_argument("--no-ui", action="store_true", help="print once instead of opening the interactive UI")
+    parser.add_argument("--json", action="store_true", help="print a pricing-ready JSON report")
     args = parser.parse_args(argv)
 
     local_tz = datetime.now().astimezone().tzinfo
@@ -590,11 +652,14 @@ def main(argv: list[str] | None = None) -> int:
     combined = CombinedProvider(tuple(available_providers.values()))
     provider = combined if args.agent == CombinedProvider.key else available_providers[args.agent]
 
-    if sys.stdin.isatty() and sys.stdout.isatty() and not args.no_ui and not (args.since or args.until):
+    if sys.stdin.isatty() and sys.stdout.isatty() and not args.no_ui and not args.json and not (args.since or args.until):
         providers = {CombinedProvider.key: combined, **available_providers}
         return run_ui(providers, args.agent, args.period)
 
     result = provider.scan()
+    if args.json:
+        print(json.dumps(report_data(result, start, end, provider, ), indent=2))
+        return 0
     print("\n".join(report_lines(result, start, end, provider, shutil.get_terminal_size((90, 24)).columns)))
     return 0
 

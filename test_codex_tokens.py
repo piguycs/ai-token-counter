@@ -13,6 +13,7 @@ from codex_tokens import (
     filter_usage,
     parse_session,
     period_dates,
+    report_data,
     report_lines,
     month_period,
     shift_month,
@@ -118,8 +119,34 @@ class TokenLogTests(unittest.TestCase):
         self.assertEqual(result.files_scanned, 1)
         self.assertEqual((result.usage[0].input_tokens, result.usage[0].output_tokens), (7, 3))
 
-    def test_shared_ui_uses_only_common_metrics(self):
-        self.assertEqual(common_metrics(), frozenset({"input", "output"}))
+    def test_shared_ui_uses_all_common_pricing_metrics(self):
+        self.assertEqual(common_metrics(), frozenset({"input", "output", "cached_input"}))
+
+    def test_report_shows_cached_input_summary_and_column(self):
+        from codex_tokens import ScanResult, Usage
+        rows = [
+            Usage(datetime(2026, 9, 1, tzinfo=timezone.utc), "m", 100, 20, cached_input_tokens=40, agent="Codex"),
+        ]
+        lines = report_lines(ScanResult(rows), None, None, CodexProvider(Path(".")), 90)
+        self.assertTrue(any("CACHED INPUT" in line for line in lines))
+        self.assertTrue(any("Cached input" in line for line in lines))
+        self.assertTrue(any("100" in line and "20" in line and "40" in line for line in lines))
+
+    def test_json_report_has_api_pricing_token_buckets(self):
+        from codex_tokens import ScanResult, Usage
+        rows = [
+            Usage(datetime(2026, 9, 1, tzinfo=timezone.utc), "m", 100, 20, cached_input_tokens=40, agent="Codex"),
+            Usage(datetime(2026, 9, 1, tzinfo=timezone.utc), "m", 10, 3, cached_input_tokens=2, agent="OpenCode"),
+        ]
+        data = report_data(ScanResult(rows, files_scanned=1), None, None, CombinedProvider(()))
+        self.assertEqual(data["totals"], {
+            "input_tokens": 110,
+            "cached_input_tokens": 42,
+            "uncached_input_tokens": 68,
+            "output_tokens": 23,
+        })
+        self.assertEqual(data["models"][0]["agent"], "Codex")
+        self.assertEqual(data["models"][1]["uncached_input_tokens"], 8)
 
     def test_combined_provider_merges_normalized_usage(self):
         class FakeProvider:
